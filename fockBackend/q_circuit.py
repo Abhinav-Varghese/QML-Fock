@@ -39,7 +39,7 @@ def parse_terminal_args():
     parser.add_argument("--epochs", type=int, default=15)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=0.01, help="Adam learning rate")
-    parser.add_argument("--cutoff_dim", type=int, default=5,
+    parser.add_argument("--cutoff_dim", type=int, default=4,
                         help="Fock space photon cutoff dimension")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save_dir", type=str, default="results",
