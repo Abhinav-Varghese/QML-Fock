@@ -1,161 +1,400 @@
 import argparse
+import json
+import os
+import time
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")  # Headless backend for HPC nodes
+import matplotlib.pyplot as plt
+from sklearn.metrics import roc_auc_score, roc_curve, accuracy_score
+
 import strawberryfields as sf
 from strawberryfields.ops import Dgate, Sgate, Rgate, BSgate
 import tensorflow as tf
 
-# ==============================================================================
-# 1. TOPOLOGY HELPER
-# ==============================================================================
-
-def get_bs_pairs(n_wires, topology):
-    """Returns a list of (wire1, wire2) tuples based on the chosen architecture."""
-    if topology == "ladder":
-        # Wires only connect to their immediate neighbors (0-1, 1-2)
-        return [(i, i + 1) for i in range(n_wires - 1)]
-    elif topology == "ring":
-        # Ladder, but the last wire loops back to the first (0-1, 1-2, 2-0)
-        return [(i, (i + 1) % n_wires) for i in range(n_wires)]
-    elif topology == "all-to-all":
-        # Every wire connects to every other wire
-        pairs = []
-        for i in range(n_wires):
-            for j in range(i + 1, n_wires):
-                pairs.append((i, j))
-        return pairs
-    else:
-        raise ValueError(f"Unknown topology: {topology}")
 
 # ==============================================================================
-# 2. ARGUMENTS & WEIGHT INITIALIZATION
+# 1. ARGUMENT PARSING & TOPOLOGY HELPER
 # ==============================================================================
 
 def parse_terminal_args():
-    """Catches inputs from the HPC terminal job script."""
-    parser = argparse.ArgumentParser(description="QML Particle Physics Circuit")
-    
-    parser.add_argument("--n_wires", type=int, default=3)
-    parser.add_argument("--num_layers", type=int, default=3)
-    parser.add_argument("--circ_seq", type=str, default="br", 
-                        help="Sequence of variational gates (e.g., 'br', 'bsr')")
-    parser.add_argument("--topology", type=str, default="ladder", 
-                        choices=["ladder", "ring", "all-to-all"],
-                        help="Entanglement architecture for Beamsplitters")
-    parser.add_argument("--cutoff_dim", type=int, default=4,
-                        help="Fock space cutoff dimension for the simulation")
-    
-    args = parser.parse_args()
-    return vars(args)
+    """Catches hyperparameters and circuit architecture flags from the HPC terminal."""
+    parser = argparse.ArgumentParser(description="CV-QML Particle Physics Training & Evaluation")
 
-def initialize_weights(config):
-    """Allocates TensorFlow variables dynamically based on topology and sequence."""
+    # Circuit Architecture
+    parser.add_argument("--n_wires", type=int, default=3,
+                        help="Number of qumodes/particles per event")
+    parser.add_argument("--num_layers", type=int, default=3,
+                        help="Number of data re-uploading layers")
+    parser.add_argument("--circ_seq", type=str, default="br",
+                        help="Variational gate sequence (e.g., 'br', 'bsr', 'dbr')")
+    parser.add_argument("--topology", type=str, default="ladder",
+                        choices=["ladder", "ring", "all-to-all"],
+                        help="Beamsplitter entanglement topology")
+    parser.add_argument("--readout", type=str, default="all",
+                        choices=["single", "all"],
+                        help="Homodyne readout: wire 0 only ('single') or all wires + Dense ('all')")
+
+    # Training & Simulator Hyperparameters
+    parser.add_argument("--epochs", type=int, default=15)
+    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--lr", type=float, default=0.01, help="Adam learning rate")
+    parser.add_argument("--cutoff_dim", type=int, default=5,
+                        help="Fock space photon cutoff dimension")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--save_dir", type=str, default="results",
+                        help="Directory to save metrics, weights, and ROC plots")
+
+    return vars(parser.parse_args())
+
+
+def get_bs_pairs(n_wires, topology):
+    """Returns a list of (wire1, wire2) tuples based on the chosen topology."""
+    if topology == "ladder":
+        return [(i, i + 1) for i in range(n_wires - 1)]
+    elif topology == "ring":
+        return [(i, (i + 1) % n_wires) for i in range(n_wires)]
+    elif topology == "all-to-all":
+        return [(i, j) for i in range(n_wires) for j in range(i + 1, n_wires)]
+    else:
+        raise ValueError(f"Unknown topology: {topology}")
+
+
+# ==============================================================================
+# 2. DATA LOADING (REPLACE WITH YOUR ACTUAL PHYSICS DATASET)
+# ==============================================================================
+
+def load_dataset(n_wires, n_train=640, n_val=256):
+    """
+    Placeholder dataset generator with shape (N, n_wires, 3) -> [eta, pt, phi].
+    Replace this function with your actual data loader (e.g., np.load / h5py).
+    Ensure pt is normalized (e.g., scaled to [0, 1.5]) so photon numbers stay below cutoff_dim.
+    """
+    # Background events (label 0): lower transverse momentum, broader eta
+    x_bg = np.stack([
+        np.random.normal(0.0, 1.2, size=( (n_train + n_val) // 2, n_wires )),  # eta
+        np.random.uniform(0.1, 0.7, size=( (n_train + n_val) // 2, n_wires )), # normalized pt
+        np.random.uniform(-np.pi, np.pi, size=( (n_train + n_val) // 2, n_wires )) # phi
+    ], axis=-1).astype(np.float32)
+    y_bg = np.zeros((len(x_bg), 1), dtype=np.float32)
+
+    # Signal events (label 1): higher transverse momentum, more central eta
+    x_sig = np.stack([
+        np.random.normal(0.0, 0.6, size=( (n_train + n_val) // 2, n_wires )),  # eta
+        np.random.uniform(0.6, 1.3, size=( (n_train + n_val) // 2, n_wires )), # normalized pt
+        np.random.uniform(-np.pi, np.pi, size=( (n_train + n_val) // 2, n_wires )) # phi
+    ], axis=-1).astype(np.float32)
+    y_sig = np.ones((len(x_sig), 1), dtype=np.float32)
+
+    x_all = np.concatenate([x_bg, x_sig], axis=0)
+    y_all = np.concatenate([y_bg, y_sig], axis=0)
+
+    # Shuffle before splitting
+    perm = np.random.permutation(len(x_all))
+    x_all, y_all = x_all[perm], y_all[perm]
+
+    return (x_all[:n_train], y_all[:n_train]), (x_all[n_train:], y_all[n_train:])
+
+
+# ==============================================================================
+# 3. MODEL & WEIGHT INITIALIZATION
+# ==============================================================================
+
+def initialize_model(config):
+    """Allocates quantum gate variables and the optional classical readout layer."""
     params = {}
     l = config["num_layers"]
     w = config["n_wires"]
-    
-    # Calculate exact number of beamsplitters needed for this topology
+
     bs_pairs = get_bs_pairs(w, config["topology"])
-    num_bs = len(bs_pairs)
-    
     shape_single = (l, w)
-    shape_pairs = (l, num_bs) 
+    shape_pairs = (l, len(bs_pairs))
 
-    # --- Static Encoding Weights (Displacement & Squeezing) ---
-    params["enc_d_pt"] = tf.Variable(tf.random.normal(shape_single, stddev=0.1))
-    params["enc_d_eta"] = tf.Variable(tf.random.normal(shape_single, stddev=0.1))
-    params["enc_s_mag"] = tf.Variable(tf.random.normal(shape_single, stddev=0.1))
-    params["enc_s_phi"] = tf.Variable(tf.random.normal(shape_single, stddev=0.1))
+    # Static Polar Encoding Weights
+    params["enc_d_pt"] = tf.Variable(tf.random.normal(shape_single, stddev=0.1), name="enc_d_pt")
+    params["enc_d_eta"] = tf.Variable(tf.random.normal(shape_single, stddev=0.1), name="enc_d_eta")
+    params["enc_s_mag"] = tf.Variable(tf.random.normal(shape_single, stddev=0.1), name="enc_s_mag")
+    params["enc_s_phi"] = tf.Variable(tf.random.normal(shape_single, stddev=0.1), name="enc_s_phi")
 
-    # --- Dynamic Variational Weights ---
+    # Dynamic Variational Weights
     circ_seq = config["circ_seq"].lower()
-    
     if 'b' in circ_seq:
-        params["var_b_theta"] = tf.Variable(tf.random.normal(shape_pairs, stddev=0.1))
-        params["var_b_phi"] = tf.Variable(tf.random.normal(shape_pairs, stddev=0.1))
+        params["var_b_theta"] = tf.Variable(tf.random.normal(shape_pairs, stddev=0.1), name="var_b_theta")
+        params["var_b_phi"] = tf.Variable(tf.random.normal(shape_pairs, stddev=0.1), name="var_b_phi")
     if 'r' in circ_seq:
-        params["var_r_angle"] = tf.Variable(tf.random.normal(shape_single, stddev=0.1))
+        params["var_r_angle"] = tf.Variable(tf.random.normal(shape_single, stddev=0.1), name="var_r_angle")
     if 's' in circ_seq:
-        params["var_s_mag"] = tf.Variable(tf.random.normal(shape_single, stddev=0.1))
-        params["var_s_phi"] = tf.Variable(tf.random.normal(shape_single, stddev=0.1))
+        params["var_s_mag"] = tf.Variable(tf.random.normal(shape_single, stddev=0.1), name="var_s_mag")
+        params["var_s_phi"] = tf.Variable(tf.random.normal(shape_single, stddev=0.1), name="var_s_phi")
     if 'd' in circ_seq:
-        params["var_d_mag"] = tf.Variable(tf.random.normal(shape_single, stddev=0.1))
-        params["var_d_phi"] = tf.Variable(tf.random.normal(shape_single, stddev=0.1))
-        
-    return params
+        params["var_d_mag"] = tf.Variable(tf.random.normal(shape_single, stddev=0.1), name="var_d_mag")
+        params["var_d_phi"] = tf.Variable(tf.random.normal(shape_single, stddev=0.1), name="var_d_phi")
+
+    readout_layer = None
+    if config["readout"] == "all":
+        readout_layer = tf.keras.layers.Dense(1, name="classical_readout")
+        readout_layer.build(input_shape=(None, w))
+
+    return params, readout_layer
+
 
 # ==============================================================================
-# 3. QUANTUM CIRCUIT DEFINITIONS
+# 4. QUANTUM CIRCUIT & HOMODYNE READOUT
 # ==============================================================================
 
-def static_polar_encoding(x, n_wires, params, layer=0):
-    """Statically embeds [eta, pt, phi] using Displacement then Squeezing."""
+def static_polar_encoding(x_batch, n_wires, params, layer=0):
+    """Embeds [eta, pt, phi] across a batch using Displacement then Squeezing."""
     for wire in range(n_wires):
-        eta, pt, phi = x[wire, 0], x[wire, 1], x[wire, 2]
+        eta = x_batch[:, wire, 0]
+        pt  = x_batch[:, wire, 1]
+        phi = x_batch[:, wire, 2]
 
-        w_pt = params["enc_d_pt"][layer, wire]
-        w_eta = params["enc_d_eta"][layer, wire]
-        w_sq_r = params["enc_s_mag"][layer, wire]
-        w_phi = params["enc_s_phi"][layer, wire]
+        Dgate(params["enc_d_pt"][layer, wire] * pt,
+              params["enc_d_eta"][layer, wire] * eta) | wire
+        Sgate(params["enc_s_mag"][layer, wire],
+              params["enc_s_phi"][layer, wire] * phi) | wire
 
-        Dgate(w_pt * pt, w_eta * eta) | wire
-        Sgate(w_sq_r, w_phi * phi) | wire
 
 def dynamic_variational_layer(n_wires, params, circ_seq, topology, layer=0):
-    """Constructs the trainable layer using the requested gate sequence and topology."""
+    """Applies trainable gates in the sequence and Beamsplitter topology requested."""
     for gate_char in circ_seq.lower():
-        
         if gate_char == 'b':
-            # Fetch the specific wiring pairs for this architecture
-            bs_pairs = get_bs_pairs(n_wires, topology)
-            
-            for bs_idx, (wire1, wire2) in enumerate(bs_pairs):
-                w_theta = params["var_b_theta"][layer, bs_idx]
-                w_phi = params["var_b_phi"][layer, bs_idx]
-                BSgate(w_theta, w_phi) | (wire1, wire2)
-                
+            for bs_idx, (w1, w2) in enumerate(get_bs_pairs(n_wires, topology)):
+                BSgate(params["var_b_theta"][layer, bs_idx],
+                       params["var_b_phi"][layer, bs_idx]) | (w1, w2)
         elif gate_char == 'r':
             for i in range(n_wires):
                 Rgate(params["var_r_angle"][layer, i]) | i
-                
         elif gate_char == 's':
             for i in range(n_wires):
                 Sgate(params["var_s_mag"][layer, i], params["var_s_phi"][layer, i]) | i
-                
         elif gate_char == 'd':
             for i in range(n_wires):
                 Dgate(params["var_d_mag"][layer, i], params["var_d_phi"][layer, i]) | i
-                
         else:
             raise ValueError(f"Unsupported variational gate: '{gate_char}'")
 
-# ==============================================================================
-# 4. MAIN EXECUTION
-# ==============================================================================
 
-if __name__ == "__main__":
-    # 1. Catch HPC Configurations
-    config = parse_terminal_args()
-    print(f"--- Building QML Circuit with Config: {config} ---")
-    
-    # 2. Allocate variables precisely
-    trainable_params = initialize_weights(config)
-    
-    # 3. Create dummy batch of kinematic data (e.g., 1 event with `n_wires` particles)
-    x_data = tf.random.uniform((config["n_wires"], 3), minval=0.1, maxval=2.0)
-    
-    # 4. Construct DAG Blueprint
+def extract_homodyne_logits(state, config, readout_layer):
+    """Performs fixed X-quadrature (phi=0.0) homodyne expectation readout."""
+    if config["readout"] == "single":
+        x_mean = state.quad_expectation(mode=0, phi=0.0)[0]
+        return tf.expand_dims(x_mean, axis=-1)
+    elif config["readout"] == "all":
+        wire_means = [
+            state.quad_expectation(mode=w, phi=0.0)[0]
+            for w in range(config["n_wires"])
+        ]
+        quantum_features = tf.stack(wire_means, axis=1)
+        return readout_layer(quantum_features)
+
+
+def forward_pass(x_batch, config, params, readout_layer):
+    """Builds and runs one batched forward pass of the quantum circuit."""
+    current_bs = int(x_batch.shape[0])
+    eng = sf.Engine(
+        "tf",
+        backend_options={
+            "cutoff_dim": config["cutoff_dim"],
+            "batch_size": current_bs
+        }
+    )
+
     prog = sf.Program(config["n_wires"])
     with prog.context:
         for layer in range(config["num_layers"]):
-            static_polar_encoding(x_data, config["n_wires"], trainable_params, layer)
-            
-            # Now passing `topology` down to the variational layer
+            static_polar_encoding(x_batch, config["n_wires"], params, layer)
             dynamic_variational_layer(
-                config["n_wires"], trainable_params, 
+                config["n_wires"], params,
                 config["circ_seq"], config["topology"], layer
             )
 
-    # 5. Run on TensorFlow Backend
-    eng = sf.Engine("tf", backend_options={"cutoff_dim": cutoff_dim})
     result = eng.run(prog)
-    
-    print("Execution complete. Final Quantum State tensor shape:", result.state.ket().shape)
+    return extract_homodyne_logits(result.state, config, readout_layer)
+
+
+# ==============================================================================
+# 5. TRAINING STEP, INFERENCE & EVALUATION METRICS
+# ==============================================================================
+
+def train_step(x_batch, y_batch, config, params, readout_layer, optimizer, loss_fn):
+    """Executes one gradient descent update step on a batch."""
+    with tf.GradientTape() as tape:
+        logits = forward_pass(x_batch, config, params, readout_layer)
+        loss = loss_fn(y_batch, logits)
+
+    trainable_vars = list(params.values())
+    if readout_layer is not None:
+        trainable_vars += readout_layer.trainable_variables
+
+    gradients = tape.gradient(loss, trainable_vars)
+    optimizer.apply_gradients(zip(gradients, trainable_vars))
+    return loss
+
+
+def predict_logits(x_data, config, params, readout_layer):
+    """Runs pure forward inference across a dataset without gradient overhead."""
+    num_samples = x_data.shape[0]
+    batch_size = config["batch_size"]
+    all_logits = []
+
+    for start_idx in range(0, num_samples, batch_size):
+        x_batch = x_data[start_idx : start_idx + batch_size]
+        logits = forward_pass(x_batch, config, params, readout_layer)
+        all_logits.append(logits.numpy())
+
+    return np.concatenate(all_logits, axis=0)
+
+
+def evaluate_and_save_results(x_val, y_val, history, config, params, readout_layer):
+    """Computes final ROC AUC, accuracy, background rejection, and saves all artifacts."""
+    save_dir = config["save_dir"]
+    os.makedirs(save_dir, exist_ok=True)
+
+    run_id = (
+        f"w{config['n_wires']}_l{config['num_layers']}_"
+        f"{config['circ_seq']}_{config['topology']}_{config['readout']}"
+    )
+
+    # 1. Inference & Probabilities
+    logits = predict_logits(x_val, config, params, readout_layer)
+    probs = tf.sigmoid(logits).numpy().ravel()
+    y_true = np.asarray(y_val).ravel()
+
+    # 2. Metrics
+    auc_score = roc_auc_score(y_true, probs)
+    acc = accuracy_score(y_true, (probs >= 0.5).astype(int))
+    fpr, tpr, thresholds = roc_curve(y_true, probs)
+
+    idx_50 = np.argmin(np.abs(tpr - 0.5))
+    bg_rejection_50 = 1.0 / max(fpr[idx_50], 1e-6)
+
+    # 3. Save Raw Arrays & Trained Weights
+    np.savez(
+        os.path.join(save_dir, f"roc_data_{run_id}.npz"),
+        fpr=fpr,
+        tpr=tpr,
+        thresholds=thresholds,
+        auc=auc_score,
+        accuracy=acc,
+        bg_rejection_50=bg_rejection_50
+    )
+
+    weight_dict = {k: v.numpy() for k, v in params.items()}
+    if readout_layer is not None:
+        w_dense, b_dense = readout_layer.get_weights()
+        weight_dict["dense_kernel"] = w_dense
+        weight_dict["dense_bias"] = b_dense
+    np.savez(os.path.join(save_dir, f"weights_{run_id}.npz"), **weight_dict)
+
+    # 4. Save JSON Metrics & Training History
+    summary = {
+        "run_id": run_id,
+        "roc_auc": float(auc_score),
+        "accuracy": float(acc),
+        "bg_rejection_at_50pct_eff": float(bg_rejection_50),
+        "history": history,
+        "config": config
+    }
+    with open(os.path.join(save_dir, f"metrics_{run_id}.json"), "w") as f:
+        json.dump(summary, f, indent=4)
+
+    # 5. Plot ROC Curve
+    plt.figure(figsize=(6.5, 5.5))
+    plt.plot(fpr, tpr, lw=2, label=f"{run_id} (AUC = {auc_score:.4f})")
+    plt.plot([0, 1], [0, 1], color="gray", linestyle="--", lw=1, label="Random (AUC = 0.5000)")
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel("False Positive Rate (Background Efficiency)")
+    plt.ylabel("True Positive Rate (Signal Efficiency)")
+    plt.title("CV-QML Receiver Operating Characteristic")
+    plt.legend(loc="lower right")
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, f"roc_curve_{run_id}.png"), dpi=150)
+    plt.close()
+
+    print("\n==================================================")
+    print(f"FINAL EVALUATION [{run_id}]")
+    print(f"  ROC AUC Score      : {auc_score:.4f}")
+    print(f"  Accuracy           : {acc:.4f}")
+    print(f"  1/FPR @ 50% TPR    : {bg_rejection_50:.2f}")
+    print(f"  Artifacts saved to : {save_dir}/")
+    print("==================================================\n")
+
+
+# ==============================================================================
+# 6. MAIN EXECUTION
+# ==============================================================================
+
+if __name__ == "__main__":
+    config = parse_terminal_args()
+
+    # Reproducibility
+    np.random.seed(config["seed"])
+    tf.random.set_seed(config["seed"])
+
+    print(f"--- Starting HPC Run with Config: {json.dumps(config)} ---")
+
+    # 1. Load Data & Build Batched Pipeline
+    (x_train, y_train), (x_val, y_val) = load_dataset(config["n_wires"])
+    train_ds = (
+        tf.data.Dataset.from_tensor_slices((x_train, y_train))
+        .shuffle(buffer_size=len(x_train), seed=config["seed"])
+        .batch(config["batch_size"], drop_remainder=False)
+    )
+
+    # 2. Initialize Quantum Model & Optimizer
+    params, readout_layer = initialize_model(config)
+    optimizer = tf.keras.optimizers.Adam(learning_rate=config["lr"])
+    loss_fn = tf.keras.losses.BinaryCrossentropy(from_logits=True)
+
+    # 3. Training Loop with Best-Checkpoint Tracking
+    history = {"train_loss": [], "val_loss": [], "val_auc": []}
+    best_val_auc = -1.0
+    best_snapshot = None
+
+    for epoch in range(1, config["epochs"] + 1):
+        t0 = time.time()
+        batch_losses = []
+
+        for x_batch, y_batch in train_ds:
+            loss = train_step(
+                x_batch, y_batch, config, params, readout_layer, optimizer, loss_fn
+            )
+            batch_losses.append(float(loss.numpy()))
+
+        # Quick validation check at the end of each epoch
+        val_logits = predict_logits(x_val, config, params, readout_layer)
+        val_loss = float(loss_fn(y_val, val_logits).numpy())
+        val_probs = tf.sigmoid(val_logits).numpy().ravel()
+        val_auc = float(roc_auc_score(y_val.ravel(), val_probs))
+        train_loss = float(np.mean(batch_losses))
+
+        history["train_loss"].append(train_loss)
+        history["val_loss"].append(val_loss)
+        history["val_auc"].append(val_auc)
+
+        # Save best weights in memory so final evaluation uses the peak checkpoint
+        if val_auc > best_val_auc:
+            best_val_auc = val_auc
+            best_snapshot = (
+                {k: v.numpy().copy() for k, v in params.items()},
+                readout_layer.get_weights() if readout_layer is not None else None
+            )
+
+        elapsed = time.time() - t0
+        print(
+            f"Epoch {epoch:02d}/{config['epochs']:02d} [{elapsed:.1f}s] | "
+            f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val AUC: {val_auc:.4f}"
+        )
+
+    # 4. Restore Best Checkpoint & Run Final Metrics/ROC Generation
+    if best_snapshot is not None:
+        best_q_weights, best_dense_weights = best_snapshot
+        for k, val in best_q_weights.items():
+            params[k].assign(val)
+        if readout_layer is not None and best_dense_weights is not None:
+            readout_layer.set_weights(best_dense_weights)
+
+    evaluate_and_save_results(x_val, y_val, history, config, params, readout_layer)
