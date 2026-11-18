@@ -7,10 +7,12 @@ import matplotlib
 matplotlib.use("Agg")  # Headless backend for HPC nodes
 import matplotlib.pyplot as plt
 from sklearn.metrics import roc_auc_score, roc_curve, accuracy_score
-
+from types import SimpleNamespace
+from dataset import TTBarZJetsData
 import strawberryfields as sf
 from strawberryfields.ops import Dgate, Sgate, Rgate, BSgate
 import tensorflow as tf
+tf.get_logger().setLevel("ERROR")
 
 
 # ==============================================================================
@@ -44,6 +46,21 @@ def parse_terminal_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--save_dir", type=str, default="results",
                         help="Directory to save metrics, weights, and ROC plots")
+    
+    # Dataset & Qumode Scaling Hyperparameters
+    parser.add_argument("--dataset_path", type=str,
+                        default="/vols/cms/lgc124/QMLoutputs/TTBar_+ZJetsToNuNU_flat_merged.h5",
+                        help="Path to the merged HDF5 jet dataset")
+    parser.add_argument("--train_samples", type=int, default=2000,
+                        help="Total supervised training jets (split 50/50 sig/bkg)")
+    parser.add_argument("--val_samples", type=int, default=1000,
+                        help="Total validation jets (split 50/50 sig/bkg)")
+    parser.add_argument("--test_samples", type=int, default=1000,
+                        help="Total test jets (split 50/50 sig/bkg)")
+    parser.add_argument("--d_mult", type=float, default=1.0,
+                        help="Displacement scaling multiplier for pt_frac")
+    parser.add_argument("--s_mult", type=float, default=1.0,
+                        help="Squeezing scaling multiplier for eta")
 
     return vars(parser.parse_args())
 
@@ -64,35 +81,24 @@ def get_bs_pairs(n_wires, topology):
 # 2. DATA LOADING (REPLACE WITH YOUR ACTUAL PHYSICS DATASET)
 # ==============================================================================
 
-def load_dataset(n_wires, n_train=640, n_val=256):
-    """
-    Placeholder dataset generator with shape (N, n_wires, 3) -> [eta, pt, phi].
-    Replace this function with your actual data loader (e.g., np.load / h5py).
-    Ensure pt is normalized (e.g., scaled to [0, 1.5]) so photon numbers stay below cutoff_dim.
-    """
-    # Background events (label 0): lower transverse momentum, broader eta
-    x_bg = np.stack([
-        np.random.normal(0.0, 1.2, size=( (n_train + n_val) // 2, n_wires )),  # eta
-        np.random.uniform(0.1, 0.7, size=( (n_train + n_val) // 2, n_wires )), # normalized pt
-        np.random.uniform(-np.pi, np.pi, size=( (n_train + n_val) // 2, n_wires )) # phi
-    ], axis=-1).astype(np.float32)
-    y_bg = np.zeros((len(x_bg), 1), dtype=np.float32)
-
-    # Signal events (label 1): higher transverse momentum, more central eta
-    x_sig = np.stack([
-        np.random.normal(0.0, 0.6, size=( (n_train + n_val) // 2, n_wires )),  # eta
-        np.random.uniform(0.6, 1.3, size=( (n_train + n_val) // 2, n_wires )), # normalized pt
-        np.random.uniform(-np.pi, np.pi, size=( (n_train + n_val) // 2, n_wires )) # phi
-    ], axis=-1).astype(np.float32)
-    y_sig = np.ones((len(x_sig), 1), dtype=np.float32)
-
-    x_all = np.concatenate([x_bg, x_sig], axis=0)
-    y_all = np.concatenate([y_bg, y_sig], axis=0)
-
-    # Shuffle before splitting
-    perm = np.random.permutation(len(x_all))
-    x_all, y_all = x_all[perm], y_all[perm]
-
+def load_dataset(config):
+    """Adapts flat CLI config into the nested cfg expected by TTBarZJetsData."""
+    cfg = SimpleNamespace(
+        circuit=SimpleNamespace(wires=config["n_wires"]),
+        data=SimpleNamespace(
+            dataset_path=config["dataset_path"],
+            train_num_samples=config["train_samples"],
+            val_num_samples=config["val_samples"],
+            test_num_samples=config["test_samples"],
+            d_mult=config["d_mult"],
+            s_mult=config["s_mult"],
+        ),
+    )
+    rng = np.random.default_rng(config["seed"])
+    data_handler = TTBarZJetsData(cfg)
+    x_train, y_train, x_val, y_val, x_test, y_test = data_handler.createSupervisedDatasets(rng)
+    data_handler.free_raw_data()
+    return (x_train, y_train), (x_val, y_val), (x_test, y_test)
     return (x_all[:n_train], y_all[:n_train]), (x_all[n_train:], y_all[n_train:])
 
 
@@ -337,7 +343,7 @@ if __name__ == "__main__":
     print(f"--- Starting HPC Run with Config: {json.dumps(config)} ---")
 
     # 1. Load Data & Build Batched Pipeline
-    (x_train, y_train), (x_val, y_val) = load_dataset(config["n_wires"])
+    (x_train, y_train), (x_val, y_val), (x_test, y_test) = load_dataset(config)
     train_ds = (
         tf.data.Dataset.from_tensor_slices((x_train, y_train))
         .shuffle(buffer_size=len(x_train), seed=config["seed"])
@@ -397,4 +403,4 @@ if __name__ == "__main__":
         if readout_layer is not None and best_dense_weights is not None:
             readout_layer.set_weights(best_dense_weights)
 
-    evaluate_and_save_results(x_val, y_val, history, config, params, readout_layer)
+    evaluate_and_save_results(x_test, y_test, history, config, params, readout_layer)
