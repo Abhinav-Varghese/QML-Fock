@@ -8,7 +8,7 @@ matplotlib.use("Agg")  # Headless backend for HPC nodes
 import matplotlib.pyplot as plt
 from sklearn.metrics import roc_auc_score, roc_curve, accuracy_score
 from types import SimpleNamespace
-from dataset import TTBarZJetsData
+from data_loader import TTBarZJetsData
 import strawberryfields as sf
 from strawberryfields.ops import Dgate, Sgate, Rgate, BSgate
 import tensorflow as tf
