@@ -49,7 +49,7 @@ def parse_terminal_args():
     
     # Dataset & Qumode Scaling Hyperparameters
     parser.add_argument("--dataset_path", type=str,
-                        default="/vols/cms/lgc124/QMLoutputs/TTBar_+ZJetsToNuNU_flat_merged.h5",
+                        default="/Users/abhinavvarghese/Library/CloudStorage/OneDrive-ImperialCollegeLondon/Year 4/Master's project/AutoQML-dev/data/QMLoutputs/TTBar_+ZJetsToNuNU_flat_merged.h5",
                         help="Path to the merged HDF5 jet dataset")
     parser.add_argument("--train_samples", type=int, default=2000,
                         help="Total supervised training jets (split 50/50 sig/bkg)")
