@@ -328,6 +328,63 @@ def evaluate_and_save_results(x_val, y_val, history, config, params, readout_lay
     print(f"  Artifacts saved to : {save_dir}/")
     print("==================================================\n")
 
+# def draw_circuit(config, save_dir="results"):
+#     """
+#     Constructs a concrete instance of the CV circuit matching `config`, prints
+#     its ASCII gate layout to stdout, and exports a LaTeX circuit diagram.
+#     """
+#     import os
+#     n_wires = config["n_wires"]
+#     num_layers = config["num_layers"]
+#     circ_seq = config["circ_seq"]
+#     topology = config["topology"]
+
+#     # Determine entangling pairs matching your circuit topology
+#     if topology == "ring":
+#         pairs = [(i, (i + 1) % n_wires) for i in range(n_wires)] if n_wires > 2 else ([(0, 1)] if n_wires == 2 else [])
+#     elif topology == "ladder":
+#         pairs = [(i, i + 1) for i in range(n_wires - 1)]
+#     elif topology == "all":
+#         pairs = [(i, j) for i in range(n_wires) for j in range(i + 1, n_wires)]
+#     else:
+#         raise ValueError(f"Unknown topology: {topology}")
+
+#     prog = sf.Program(n_wires)
+#     with prog.context as q:
+#         # 1. Data Encoding Layer: [Squeezing (eta), Displacement (pt_frac), Rotation (phi)]
+#         for i in range(n_wires):
+#             sf.ops.Sgate(0.5, 0.0) | q[i]
+#             sf.ops.Dgate(0.5, 0.0) | q[i]
+#             sf.ops.Rgate(0.5) | q[i]
+
+#         # 2. Variational Ansatz Layers
+#         for _ in range(num_layers):
+#             for gate_code in circ_seq:
+#                 if gate_code == "b":  # Beamsplitter entanglement
+#                     for i, j in pairs:
+#                         sf.ops.BSgate(0.25, 0.25) | (q[i], q[j])
+#                 elif gate_code == "r":  # Phase rotation
+#                     for i in range(n_wires):
+#                         sf.ops.Rgate(0.25) | q[i]
+#                 elif gate_code == "s":  # Squeezing
+#                     for i in range(n_wires):
+#                         sf.ops.Sgate(0.25, 0.0) | q[i]
+#                 elif gate_code == "d":  # Displacement
+#                     for i in range(n_wires):
+#                         sf.ops.Dgate(0.25, 0.0) | q[i]
+#                 elif gate_code == "k":  # Kerr non-linearity
+#                     for i in range(n_wires):
+#                         sf.ops.Kgate(0.25) | q[i]
+
+#     # Print clean ASCII representation to terminal / PBS log
+#     print("\n=== CV Quantum Circuit Architecture ===")
+#     prog.print()
+
+#     # Export LaTeX Qcircuit file (and PDF if pdflatex is available on the system)
+#     os.makedirs(save_dir, exist_ok=True)
+#     tex_path = prog.draw_circuit(tex_dir=save_dir, write_to_file=True)
+#     print(f"Saved LaTeX circuit diagram to: {tex_path}\n")
+#     return prog
 
 # ==============================================================================
 # 6. MAIN EXECUTION
@@ -349,7 +406,8 @@ if __name__ == "__main__":
         .shuffle(buffer_size=len(x_train), seed=config["seed"])
         .batch(config["batch_size"], drop_remainder=False)
     )
-
+    # config = parse_terminal_args()
+    # draw_circuit(config, save_dir=config["save_dir"])
     # 2. Initialize Quantum Model & Optimizer
     params, readout_layer = initialize_model(config)
     optimizer = tf.keras.optimizers.Adam(learning_rate=config["lr"])
