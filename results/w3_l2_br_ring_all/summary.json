@@ -1,0 +1,25 @@
+{
+    "run_id": "w3_l2_br_ring_all",
+    "roc_auc": 0.6542250000000001,
+    "accuracy": 0.605,
+    "bg_rejection_at_50pct_eff": 3.2258064516129035,
+    "config": {
+        "n_wires": 3,
+        "num_layers": 2,
+        "circ_seq": "br",
+        "topology": "ring",
+        "readout": "all",
+        "epochs": 5,
+        "batch_size": 32,
+        "lr": 0.01,
+        "cutoff_dim": 4,
+        "seed": 42,
+        "save_dir": "results",
+        "dataset_path": "/rds/general/user/av523/home/projects/myproject/data/QMLoutputs/TTBar_+ZJetsToNuNU_flat_merged.h5",
+        "train_samples": 1000,
+        "val_samples": 400,
+        "test_samples": 400,
+        "d_mult": 1.0,
+        "s_mult": 1.0
+    }
+}

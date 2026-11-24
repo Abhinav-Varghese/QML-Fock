@@ -252,15 +252,6 @@ def predict_logits(x_data, config, params, readout_layer):
 
     return np.concatenate(all_logits, axis=0)
 
-
-import csv
-import json
-import os
-import numpy as np
-import tensorflow as tf
-from sklearn.metrics import accuracy_score, roc_auc_score, roc_curve
-
-
 def evaluate_and_save_results(x_val, y_val, history, config, params, readout_layer):
     """Computes final metrics and saves plottable CSVs, weights, and config in a run-specific folder."""
     run_id = (
