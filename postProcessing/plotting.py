@@ -69,8 +69,8 @@ def plot_selected_runs(save_dir, runs, output_dir=None, save_individual=True):
         c = colors[idx % len(colors)]
         label = run["label"]
 
-        if "loss" in df.columns:
-            ax_loss.plot(df["epoch"], df["loss"], color=c, linestyle="--", alpha=0.65, label=f"{label} (train)")
+        if "train_loss" in df.columns:
+            ax_loss.plot(df["epoch"], df["train_loss"], color=c, linestyle="--", alpha=0.65, label=f"{label} (train)")
             has_loss = True
         if "val_loss" in df.columns:
             ax_loss.plot(df["epoch"], df["val_loss"], color=c, linestyle="-", lw=2, label=f"{label} (val)")
