@@ -6,6 +6,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")  # Headless backend for HPC nodes
 import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 from sklearn.metrics import roc_auc_score, roc_curve, accuracy_score
 from types import SimpleNamespace
 from data_loader import TTBarZJetsData
@@ -252,15 +253,24 @@ def predict_logits(x_data, config, params, readout_layer):
     return np.concatenate(all_logits, axis=0)
 
 
-def evaluate_and_save_results(x_val, y_val, history, config, params, readout_layer):
-    """Computes final ROC AUC, accuracy, background rejection, and saves all artifacts."""
-    save_dir = config["save_dir"]
-    os.makedirs(save_dir, exist_ok=True)
+import csv
+import json
+import os
+import numpy as np
+import tensorflow as tf
+from sklearn.metrics import accuracy_score, roc_auc_score, roc_curve
 
+
+def evaluate_and_save_results(x_val, y_val, history, config, params, readout_layer):
+    """Computes final metrics and saves plottable CSVs, weights, and config in a run-specific folder."""
     run_id = (
         f"w{config['n_wires']}_l{config['num_layers']}_"
         f"{config['circ_seq']}_{config['topology']}_{config['readout']}"
     )
+    
+    # Create a dedicated directory for this specific run
+    run_dir = os.path.join(config["save_dir"], run_id)
+    os.makedirs(run_dir, exist_ok=True)
 
     # 1. Inference & Probabilities
     logits = predict_logits(x_val, config, params, readout_layer)
@@ -275,116 +285,129 @@ def evaluate_and_save_results(x_val, y_val, history, config, params, readout_lay
     idx_50 = np.argmin(np.abs(tpr - 0.5))
     bg_rejection_50 = 1.0 / max(fpr[idx_50], 1e-6)
 
-    # 3. Save Raw Arrays & Trained Weights
-    np.savez(
-        os.path.join(save_dir, f"roc_data_{run_id}.npz"),
-        fpr=fpr,
-        tpr=tpr,
-        thresholds=thresholds,
-        auc=auc_score,
-        accuracy=acc,
-        bg_rejection_50=bg_rejection_50
-    )
-
+    # 3. Save Trained Weights
     weight_dict = {k: v.numpy() for k, v in params.items()}
     if readout_layer is not None:
         w_dense, b_dense = readout_layer.get_weights()
         weight_dict["dense_kernel"] = w_dense
         weight_dict["dense_bias"] = b_dense
-    np.savez(os.path.join(save_dir, f"weights_{run_id}.npz"), **weight_dict)
+    np.savez(os.path.join(run_dir, "weights.npz"), **weight_dict)
 
-    # 4. Save JSON Metrics & Training History
+    # 4. Save Summary Metrics & Config (JSON)
     summary = {
         "run_id": run_id,
         "roc_auc": float(auc_score),
         "accuracy": float(acc),
         "bg_rejection_at_50pct_eff": float(bg_rejection_50),
-        "history": history,
         "config": config
     }
-    with open(os.path.join(save_dir, f"metrics_{run_id}.json"), "w") as f:
+    with open(os.path.join(run_dir, "summary.json"), "w") as f:
         json.dump(summary, f, indent=4)
 
-    # 5. Plot ROC Curve
-    plt.figure(figsize=(6.5, 5.5))
-    plt.plot(fpr, tpr, lw=2, label=f"{run_id} (AUC = {auc_score:.4f})")
-    plt.plot([0, 1], [0, 1], color="gray", linestyle="--", lw=1, label="Random (AUC = 0.5000)")
-    plt.xlim([0.0, 1.0])
-    plt.ylim([0.0, 1.05])
-    plt.xlabel("False Positive Rate (Background Efficiency)")
-    plt.ylabel("True Positive Rate (Signal Efficiency)")
-    plt.title("CV-QML Receiver Operating Characteristic")
-    plt.legend(loc="lower right")
-    plt.grid(alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, f"roc_curve_{run_id}.png"), dpi=150)
-    plt.close()
+    # 5. Save Training History (Losses & Epoch Metrics) as CSV
+    if history and isinstance(history, dict):
+        history_path = os.path.join(run_dir, "training_history.csv")
+        keys = list(history.keys())
+        num_epochs = len(history[keys[0]])
+        
+        with open(history_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["epoch"] + keys)
+            for epoch in range(num_epochs):
+                writer.writerow([epoch + 1] + [history[k][epoch] for k in keys])
+
+    # 6. Save ROC Curve Points as CSV
+    roc_path = os.path.join(run_dir, "roc_curve.csv")
+    with open(roc_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["fpr", "tpr", "threshold"])
+        for fp, tp, thresh in zip(fpr, tpr, thresholds):
+            writer.writerow([fp, tp, thresh])
 
     print("\n==================================================")
     print(f"FINAL EVALUATION [{run_id}]")
     print(f"  ROC AUC Score      : {auc_score:.4f}")
     print(f"  Accuracy           : {acc:.4f}")
     print(f"  1/FPR @ 50% TPR    : {bg_rejection_50:.2f}")
-    print(f"  Artifacts saved to : {save_dir}/")
+    print(f"  Artifacts saved to : {run_dir}/")
     print("==================================================\n")
 
-# def draw_circuit(config, save_dir="results"):
-#     """
-#     Constructs a concrete instance of the CV circuit matching `config`, prints
-#     its ASCII gate layout to stdout, and exports a LaTeX circuit diagram.
-#     """
-#     import os
-#     n_wires = config["n_wires"]
-#     num_layers = config["num_layers"]
-#     circ_seq = config["circ_seq"]
-#     topology = config["topology"]
 
-#     # Determine entangling pairs matching your circuit topology
-#     if topology == "ring":
-#         pairs = [(i, (i + 1) % n_wires) for i in range(n_wires)] if n_wires > 2 else ([(0, 1)] if n_wires == 2 else [])
-#     elif topology == "ladder":
-#         pairs = [(i, i + 1) for i in range(n_wires - 1)]
-#     elif topology == "all":
-#         pairs = [(i, j) for i in range(n_wires) for j in range(i + 1, n_wires)]
-#     else:
-#         raise ValueError(f"Unknown topology: {topology}")
+def save_sf_circuit_diagram(prog, save_path, title="CV-QML Circuit"):
+    """Renders a Strawberry Fields sf.Program into a clean PNG diagram."""
+    n_modes = prog.num_subsystems
 
-#     prog = sf.Program(n_wires)
-#     with prog.context as q:
-#         # 1. Data Encoding Layer: [Squeezing (eta), Displacement (pt_frac), Rotation (phi)]
-#         for i in range(n_wires):
-#             sf.ops.Sgate(0.5, 0.0) | q[i]
-#             sf.ops.Dgate(0.5, 0.0) | q[i]
-#             sf.ops.Rgate(0.5) | q[i]
+    # Color coding by CV gate family
+    gate_colors = {
+        "Dgate": "#D6EAF8",   # Displacement (Blue)
+        "Sgate": "#E8DAEF",   # Squeezing (Purple)
+        "Rgate": "#FCF3CF",   # Rotation (Yellow)
+        "Kgate": "#FADBD8",   # Kerr (Red/Pink - non-Gaussian)
+        "Vgate": "#FADBD8",   # Cubic phase (Red/Pink - non-Gaussian)
+        "BSgate": "#D5F5E3",  # Beamsplitter (Green)
+        "CXgate": "#D5F5E3",  # Controlled-X (Green)
+        "CZgate": "#D5F5E3",  # Controlled-Z (Green)
+    }
 
-#         # 2. Variational Ansatz Layers
-#         for _ in range(num_layers):
-#             for gate_code in circ_seq:
-#                 if gate_code == "b":  # Beamsplitter entanglement
-#                     for i, j in pairs:
-#                         sf.ops.BSgate(0.25, 0.25) | (q[i], q[j])
-#                 elif gate_code == "r":  # Phase rotation
-#                     for i in range(n_wires):
-#                         sf.ops.Rgate(0.25) | q[i]
-#                 elif gate_code == "s":  # Squeezing
-#                     for i in range(n_wires):
-#                         sf.ops.Sgate(0.25, 0.0) | q[i]
-#                 elif gate_code == "d":  # Displacement
-#                     for i in range(n_wires):
-#                         sf.ops.Dgate(0.25, 0.0) | q[i]
-#                 elif gate_code == "k":  # Kerr non-linearity
-#                     for i in range(n_wires):
-#                         sf.ops.Kgate(0.25) | q[i]
+    # Track the next available column index for each mode
+    mode_cursor = [0] * n_modes
+    placed_ops = []  # (col, mode_indices, gate_name)
 
-#     # Print clean ASCII representation to terminal / PBS log
-#     print("\n=== CV Quantum Circuit Architecture ===")
-#     prog.print()
+    for cmd in prog.circuit:
+        gate_name = cmd.op.__class__.__name__
+        modes = [reg.ind for reg in cmd.reg]
 
-#     # Export LaTeX Qcircuit file (and PDF if pdflatex is available on the system)
-#     os.makedirs(save_dir, exist_ok=True)
-#     tex_path = prog.draw_circuit(tex_dir=save_dir, write_to_file=True)
-#     print(f"Saved LaTeX circuit diagram to: {tex_path}\n")
-#     return prog
+        # Span across all modes between min and max for multi-mode gates so wires don't overlap boxes
+        span = range(min(modes), max(modes) + 1)
+        col = max(mode_cursor[m] for m in span)
+
+        placed_ops.append((col, modes, gate_name))
+        for m in span:
+            mode_cursor[m] = col + 1
+
+    total_cols = max(mode_cursor) if mode_cursor else 1
+    fig, ax = plt.subplots(figsize=(max(7, total_cols * 0.95), max(2.8, n_modes * 0.85)))
+
+    # Draw horizontal qumode lines
+    for m in range(n_modes):
+        ax.plot([-0.4, total_cols - 0.3], [m, m], color="#333333", lw=1.5, zorder=1)
+        ax.text(-0.55, m, f"q[{m}]", ha="right", va="center", fontsize=10, fontweight="bold", family="monospace")
+
+    # Draw gates
+    for col, modes, gate_name in placed_ops:
+        short_label = gate_name.replace("gate", "")  # e.g., Dgate -> D, BSgate -> BS
+        color = gate_colors.get(gate_name, "#EAECEE")
+
+        if len(modes) == 1:
+            m = modes[0]
+            rect = patches.FancyBboxPatch(
+                (col - 0.32, m - 0.28), 0.64, 0.56,
+                boxstyle="round,pad=0.04", facecolor=color, edgecolor="#222222", lw=1.2, zorder=3
+            )
+            ax.add_patch(rect)
+            ax.text(col, m, short_label, ha="center", va="center", fontsize=9.5, fontweight="bold", zorder=4)
+
+        elif len(modes) == 2:
+            m1, m2 = modes
+            # Vertical coupler line connecting the two modes
+            ax.plot([col, col], [m1, m2], color="#1E8449", lw=2.2, zorder=2)
+            for m in (m1, m2):
+                rect = patches.FancyBboxPatch(
+                    (col - 0.30, m - 0.24), 0.60, 0.48,
+                    boxstyle="round,pad=0.03", facecolor=color, edgecolor="#1E8449", lw=1.2, zorder=3
+                )
+                ax.add_patch(rect)
+                ax.text(col, m, short_label, ha="center", va="center", fontsize=8.5, fontweight="bold", zorder=4)
+
+    ax.set_xlim(-1.2, total_cols - 0.1)
+    ax.set_ylim(-0.6, n_modes - 0.4)
+    ax.invert_yaxis()  # q[0] at the top
+    ax.axis("off")
+    ax.set_title(title, fontsize=12, fontweight="bold", pad=12)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
 
 # ==============================================================================
 # 6. MAIN EXECUTION
